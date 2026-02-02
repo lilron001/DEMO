@@ -70,7 +70,9 @@ class MainController:
                 'last_update_time': time.time(),
                 'vehicle_count': 0,
                 'detections': [],
-                'phase_start_time': time.time()
+                'phase_start_time': time.time(),
+                'last_ai_time': 0,
+                'cached_detections': []
             }
         
         # North starts green (will be managed by camera_loop state machine)
@@ -100,6 +102,43 @@ class MainController:
             if self.current_user and self.current_user.get('role') == 'admin':
                 if self.auth_controller:
                     self.pages['admin_users'] = AdminUsersPage(self.view.content_area, self.auth_controller)
+    
+    def get_active_cameras(self):
+        """Get list of active cameras for the sidebar"""
+        # Map logical directions to display names
+        name_map = {
+            'north': 'North Gate',
+            'south': 'South Junction',
+            'east': 'East Portal',
+            'west': 'West Avenue'
+        }
+        
+        cameras_data = []
+        for direction in self.directions:
+            manager = self.camera_managers.get(direction)
+            
+            # If camera is running (Real), status is 'active' (Green)
+            # If not running, we fall back to Simulation, so it's 'simulated' (Blue/Amber)
+            # Use 'active' for both if you want them to look 'Working', or distinct if preferred.
+            # Given user complaint "its inactive even the camera is working", they likely want 'active' or 'simulated'
+            
+            if manager and manager.is_running:
+                status = "active"
+                display_name = name_map.get(direction, direction.title())
+            else:
+                # Fallback to simulation
+                # Check if we should mark it as "Simulated" or just "Active"
+                # Let's use "simulated" which we will map to a color (INFO/Blue) or WARNING/Amber
+                status = "simulated" 
+                display_name = f"{name_map.get(direction, direction.title())}"
+
+            cameras_data.append({
+                "name": display_name,
+                "status": status,
+                "id": direction
+            })
+            
+        return cameras_data
     
     def update_sidebar_navigation(self):
         """Update sidebar with proper navigation callback after view is ready"""
@@ -165,6 +204,15 @@ class MainController:
                     f"Lane: {self.directions[cycle_state['current_lane']].upper()} | "
                     f"Remaining: {remaining:.1f}s"
                 )
+                
+                # Update sidebar active camera status
+                if self.view and hasattr(self.view, 'sidebar') and self.view.sidebar:
+                    try:
+                        active_cams = self.get_active_cameras()
+                        self.root.after(0, lambda d=active_cams: self.view.sidebar.update_cameras(d))
+                    except Exception as e:
+                        print(f"Error updating sidebar: {e}")
+
                 last_status_time = current_time
 
             
@@ -202,13 +250,30 @@ class MainController:
                             count = max(0, base_count + random.randint(-2, 2))
                             
                             # Create fake detections (Simulator always creates them, but we might not draw them)
+                            # Create fake detections (Simulator always creates them, but we might not draw them)
                             for _ in range(count):
-                                detections.append({
-                                    'class_name': 'car', 
+                                cx, cy = random.randint(100, 500), random.randint(100, 400)
+                                w, h = 60, 40 # Approx car size
+                                x1, y1 = cx - w//2, cy - h//2
+                                x2, y2 = cx + w//2, cy + h//2
+                                
+                                # Randomize types? For now mostly cars
+                                v_type = random.choice(['car', 'car', 'car', 'truck', 'bus', 'motorcycle'])
+                                
+                                det = {
+                                    'class_name': v_type, 
                                     'confidence': 0.95,
-                                    'box': [0, 0, 50, 50],
-                                    'center': (random.randint(100, 500), random.randint(100, 400))
-                                })
+                                    'bbox': [x1, y1, x2, y2],
+                                    'center': (cx, cy)
+                                }
+                                detections.append(det)
+                                
+                                # Draw if enabled
+                                if show_boxes:
+                                    color = getattr(self.yolo_detector, 'color_map', {}).get(v_type, (0, 255, 0))
+                                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                                    # Simple label
+                                    # cv2.putText(frame, v_type, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
                             
                             # -------------------------------------------------------------
                             # AI EVENT SIMULATION (Accidents & Violations)
@@ -289,13 +354,40 @@ class MainController:
                         annotated_frame = frame
                         
                         if enable_detection:
-                            # Run YOLO detection ONCE
-                            detection_result = self.yolo_detector.detect(frame)
-                            detections = detection_result.get("detections", [])
+                            # ---------------------------
+                            # PERFORMANCE OPTIMIZATION
+                            # Throttle AI to ~10 FPS (every 0.1s)
+                            # ---------------------------
+                            current_ai_time = time.time()
+                            last_ai_time = state.get('last_ai_time', 0)
                             
-                            if show_boxes:
+                            # Determine if we should run fresh detection
+                            should_detect = (current_ai_time - last_ai_time) > 0.1
+                            
+                            if should_detect:
+                                # Run YOLO detection
+                                detection_result = self.yolo_detector.detect(frame)
+                                detections = detection_result.get("detections", [])
                                 annotated_frame = detection_result.get('annotated_frame', frame)
+                                
+                                # Update cache
+                                state['last_ai_time'] = current_ai_time
+                                state['cached_detections'] = detections
                             else:
+                                # Reuse cached detections but redraw on NEW frame to prevent "ghosting"
+                                # This ensures the video background is smooth (30fps) while boxes update at 10fps
+                                detections = state.get('cached_detections', [])
+                                
+                                if show_boxes and detections:
+                                    try:
+                                        annotated_frame = self.yolo_detector.draw_detections(frame, detections)
+                                    except AttributeError:
+                                        # Fallback if method missing (shouldn't happen)
+                                        annotated_frame = frame
+                                else:
+                                    annotated_frame = frame
+                            
+                            if not show_boxes:
                                 annotated_frame = frame
 
                             # -------------------------------------------------------------
@@ -346,7 +438,7 @@ class MainController:
                                         if i >= j: continue # Avoid double check
                                         
                                         # Only check vehicles
-                                        vehicles = ['car', 'truck', 'bus']
+                                        vehicles = ['car', 'truck', 'bus', 'motorcycle']
                                         if d1['class_name'] in vehicles and d2['class_name'] in vehicles:
                                             # Box 1
                                             x1a, y1a, x2a, y2a = d1['bbox']
@@ -367,8 +459,9 @@ class MainController:
                                                 union_area = box1_area + box2_area - inter_area
                                                 iou = inter_area / union_area
                                                 
-                                                # If significant overlap (e.g. > 30% IoU), flag as potential accident
-                                                if iou > 0.3:
+                                                # If Overlap is significant, flag as potential accident (Medium Sensitivity)
+                                                # Threshold raised to 0.35 (35% overlap) to avoid false positives from perspective
+                                                if iou > 0.35:
                                                     cv2.putText(annotated_frame, "⚠️ ACCIDENT ALERT!", (50, 150), 
                                                               cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 165, 255), 3)
                                                     # Draw connecting line
@@ -440,7 +533,20 @@ class MainController:
                 elapsed = current_time - cycle_state['phase_start']
                 
                 # Dynamic adjustment removed - Using strict High/Low logic instead
-                # (Block removed)
+                # REAL-TIME ADAPTIVE LOGIC: Early Cutoff
+                # If currently GREEN and lane is empty, cut short to save time
+                if cycle_state['phase'] == 'green':
+                    current_idx = cycle_state['current_lane']
+                    # Check current vehicle count for this lane
+                    if len(all_lane_counts) > current_idx:
+                        current_vol = all_lane_counts[current_idx]
+                        
+                        # If lane is empty AND we have given at least 5s of green (Safety min)
+                        if current_vol == 0 and elapsed > 5.0:
+                            self.logger.info(f"⚡ FAST TRACK: Lane {self.directions[current_idx].upper()} is empty! Cutting green light short.")
+                            # Force Phase End immediately
+                            cycle_state['phase_duration'] = elapsed
+                            # Ensure we don't wait -> Logic below will catch 'elapsed >= duration'
 
                 # Check if phase should change
                 if elapsed >= cycle_state['phase_duration']:

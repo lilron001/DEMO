@@ -1,26 +1,28 @@
 # controllers/violation_controller.py
 from models.database import TrafficDB
+from utils.async_utils import run_in_background
 
 class ViolationController:
     """Handle traffic violation reports"""
     def __init__(self, db: TrafficDB):
         self.db = db
     
+    @run_in_background
     def save_violation(self, lane, violation_type="Red Light Violation"):
-        """Save violation to database or local file fallback"""
+        """Save violation to database or local file fallback (Async)"""
         vehicle_id = "SYS-DETECTION"
         
         # Try database first
         try:
             result = self.db.save_violation(vehicle_id, lane, violation_type, source="AI_SYSTEM")
             if result:
-                return result
+                return
         except Exception:
             pass # Fallback
             
         # Fallback: Save to local CSV/JSON if DB fails
         self._save_to_local_fallback(lane, violation_type, vehicle_id)
-        return "LOCAL_ID"
+
 
     def get_logs(self):
         """Get recent violation logs (from DB or local)"""

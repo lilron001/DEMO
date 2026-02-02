@@ -255,7 +255,7 @@ class TrafficDB:
     
     # ==================== USER MANAGEMENT ====================
     
-    def create_user(self, username: str, email: str, password_hash: str, 
+    def create_user(self, first_name: str, last_name: str, username: str, email: str, password_hash: str, 
                    role: str = "operator", is_active: bool = True) -> tuple[Optional[str], Optional[str]]:
         """Create a new user account. Returns (user_id, error_message)"""
         if not self.is_connected():
@@ -273,6 +273,8 @@ class TrafficDB:
                 return None, f"User '{username}' already exists"
             
             data = {
+                "first_name": first_name,
+                "last_name": last_name,
                 "username": username,
                 "email": email,
                 "password_hash": password_hash,

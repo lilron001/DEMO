@@ -11,6 +11,8 @@ CREATE TABLE users (
     user_id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
     username TEXT UNIQUE NOT NULL,
     email TEXT UNIQUE NOT NULL,
+    first_name TEXT,
+    last_name TEXT,
     password_hash TEXT NOT NULL,
     role TEXT CHECK (role IN ('admin', 'operator'))
          NOT NULL DEFAULT 'operator',

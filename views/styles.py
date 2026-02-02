@@ -2,35 +2,35 @@
 
 
 class Colors:
-    """Color palette for the application (Modern Dark Theme)"""
-    # Base
-    BACKGROUND = '#0f172a' # Slate 900
-    CARD_BG = '#1e293b'    # Slate 800
+    """Color palette for the application (Modern Premium Dark Theme)"""
+    # Base - Richer Dark Backgrounds
+    BACKGROUND = '#0B0F19' # Deep Navy/Black
+    CARD_BG = '#151B2B'    # Slightly lighter Navy
     
-    # Brand
-    PRIMARY = '#3b82f6'    # Blue 500
-    PRIMARY_DARK = '#2563eb' # Blue 600
-    SECONDARY = '#334155'  # Slate 700
-    ACCENT = '#64748b'     # Slate 500
-    HOVER = '#475569'      # Slate 600
+    # Brand - Electric Blue / Neon
+    PRIMARY = '#3B82F6'    # Bright Blue
+    PRIMARY_DARK = '#2563EB' 
+    SECONDARY = '#1E293B'  # Slate 800 (for secondary elements)
+    ACCENT = '#64748B'     
+    HOVER = '#2D3748'      # Dark Grey Blue for hovers
     
     # Text
-    TEXT = '#f8fafc'       # Slate 50
-    TEXT_LIGHT = '#94a3b8' # Slate 400
+    TEXT = '#F8FAFC'       # White-ish
+    TEXT_LIGHT = '#94A3B8' # Muted Blue-Grey
     
-    # State
-    SUCCESS = '#10b981'    # Emerald 500
-    WARNING = '#f59e0b'    # Amber 500
-    DANGER = '#ef4444'     # Red 500
-    INFO = '#0ea5e9'       # Sky 500
+    # State - Vibrant Indicators
+    SUCCESS = '#10B981'    # Emerald
+    WARNING = '#F59E0B'    # Amber
+    DANGER = '#EF4444'     # Red
+    INFO = '#0EA5E9'       # Sky Blue
     
     # Specific
-    BLACK = '#020617'      # Slate 950
-    DARK_GREY = '#111827'  # Gray 900
-    WHITE = '#ffffff'
+    BLACK = '#000000'
+    DARK_GREY = '#111827'
+    WHITE = '#FFFFFF'
     
     # Domain specific
-    ROAD_GREEN = '#15803d' # Green 700
+    ROAD_GREEN = '#15803d'
     ROAD_DARK = '#1e293b'
     ROAD_LIGHT = '#334155'
     
@@ -42,6 +42,7 @@ class Colors:
             'warning': Colors.WARNING,
             'error': Colors.DANGER,
             'info': Colors.INFO,
+            'simulated': '#8B5CF6', # Violet for simulation (Distinct)
             'offline': Colors.ACCENT
         }
         return status_colors.get(status.lower(), Colors.TEXT_LIGHT)

@@ -14,11 +14,11 @@ class AuthController:
         self.email_service = EmailService()
         self.pending_verification = {}  # Store pending registrations
     
-    def register_user(self, username: str, email: str, password: str, 
+    def register_user(self, first_name: str, last_name: str, username: str, email: str, password: str, 
                      role: str = "operator") -> bool:
         """Register a new user and send verification email"""
         # Validate inputs
-        if not username or not email or not password:
+        if not first_name or not last_name or not username or not email or not password:
             MessageBox.showerror("Error", "All fields are required")
             return False
         
@@ -35,6 +35,8 @@ class AuthController:
         # Store pending registration
         password_hash = User.hash_password(password)
         self.pending_verification[email] = {
+            'first_name': first_name,
+            'last_name': last_name,
             'username': username,
             'email': email,
             'password_hash': password_hash,
@@ -84,6 +86,8 @@ class AuthController:
         # Create user
         pending = self.pending_verification[email]
         user_id, error_msg = self.db.create_user(
+            pending['first_name'],
+            pending['last_name'],
             pending['username'],
             pending['email'],
             pending['password_hash'],
@@ -227,7 +231,8 @@ class AuthController:
         password_hash = User.hash_password(password)
         
         # Create user
-        user_id, error_msg = self.db.create_user(username, email, password_hash, role)
+        # Pass empty strings for first/last name for now as Admin UI doesn't support them yet
+        user_id, error_msg = self.db.create_user("", "", username, email, password_hash, role)
         
         if not user_id and error_msg:
              MessageBox.showerror("Error", f"Failed to add user: {error_msg}")
