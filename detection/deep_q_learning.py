@@ -47,23 +47,20 @@ import os
 
 # ─────────────────────────────── Constants ────────────────────────────────
 NUM_LANES = 4
-STATE_SIZE = 26        # 4 lanes × 5 features + 4 (one-hot lane) + 1 (elapsed) + 1 (buffer_locked)
+STATE_SIZE = 22        # lane1-4 weighted_counts (4), wait_times (4), emergency (4), accident (4), violation (4), current green (1), elapsed (1)
 ACTION_SIZE = 5        # Switch L0, L1, L2, L3, Extend
 
-# NOTE: No hardcoded congestion tiers.
-# Green time is computed RELATIVELY — each lane is compared against all others
-# currently observed. This means 10 vehicles is "high" if others have 2,
-# but "low" if others have 30. The DQN sees the true relative pressure.
-
-# Vehicle weights (heavier → more weight in congestion calculation)
+# Vehicle weights for congestion calculation
 VEHICLE_WEIGHTS = {
-    'car':              1.0,
-    'motorcycle':       0.5,
-    'bus':              2.5,
-    'truck':            2.5,
-    'emergency_vehicle':0.0,   # handled separately by EmergencyOverrideManager
+    'motorcycle':       1.0,
+    'car':              2.0,
+    'bus':              3.0,
+    'truck':            3.0,
+    'emergency_vehicle':0.0,
+    'accident':         0.0,
+    'pedestrian_violation': 0.0
 }
-DEFAULT_WEIGHT = 1.0
+DEFAULT_WEIGHT = 2.0
 
 # Timing (seconds)
 MIN_BUFFER_TIME      = 10    # hard minimum green — no switch allowed before this
@@ -149,97 +146,59 @@ class ReplayBuffer:
 
 # ─────────────────────────────── State Builder ────────────────────────────
 class TrafficStateBuilder:
-    """
-    Converts raw lane observations into the 26-dim state vector.
-
-    Congestion is represented RELATIVELY, not with fixed absolute thresholds.
-    Each lane's weighted count is normalised against the MAXIMUM observed
-    across all lanes in the current observation window.  This means:
-
-      • Lanes with 10 vehicles when every other lane has 10  → low relative pressure (0.25 share)
-      • A lane with 10 vehicles when others have 2           → high relative pressure (0.71 share)
-
-    The DQN therefore learns to prioritise whichever lane is busiest NOW,
-    regardless of absolute vehicle counts.
-    """
-
     @staticmethod
     def compute_weighted_count(detections: List[Dict]) -> float:
-        """Sum vehicle weights, ignoring emergency vehicles (handled separately)."""
+        """Sum vehicle weights, ignoring non-vehicle classes."""
         total = 0.0
         for det in detections:
             cls = det.get('class_name', 'car')
-            total += VEHICLE_WEIGHTS.get(cls, DEFAULT_WEIGHT)
+            if cls not in ['emergency_vehicle', 'accident', 'pedestrian_violation']:
+                # VEHICLE_WEIGHTS is defined globally in this file
+                total += VEHICLE_WEIGHTS.get(cls, 1.0)
         return total
 
     @staticmethod
-    def relative_pressure(target_w_count: float,
-                          all_w_counts:   List[float]) -> float:
-        """
-        Fraction of total traffic pressure on this lane.
+    def calculate_green_time(weighted_count: float, has_accident: bool, has_violation: bool) -> int:
+        """Calculate green time extension based on congestion count."""
+        if weighted_count <= 5:
+            base_time = 25  # Small extension -> 25s
+        elif weighted_count <= 15:
+            base_time = 40  # Moderate extension -> 40s
+        else:
+            base_time = 60  # Longer extension -> 60s
+        
+        # Accident restricted mode penalty -> reduce green extension
+        if has_accident:
+            base_time = int(base_time * 0.7)
+            
+        # Pedestrian violation penalty -> slightly reduce green time
+        if has_violation:
+            base_time -= 5
 
-        Returns a value in [0, 1].  If all lanes are equal it returns 1/N.
-        If this lane is completely empty it returns 0.0.
-
-        Args:
-            target_w_count : weighted count for the lane we're evaluating
-            all_w_counts   : weighted counts for ALL lanes (including target)
-        """
-        total = sum(all_w_counts)
-        if total <= 0.0:
-            return 0.0
-        return float(np.clip(target_w_count / total, 0.0, 1.0))
+        return max(NORMAL_MIN_GREEN, min(base_time, MAX_GREEN_NORMAL))
 
     @staticmethod
-    def relative_green_time(target_lane:   int,
-                            all_w_counts:  List[float]) -> int:
-        """
-        Compute RELATIVE green time for a lane based on its share of total
-        traffic pressure across all observed lanes.
-
-        Formula:
-            pressure = w_count[target] / sum(w_counts)   ∈ [0, 1]
-            green    = MIN_GREEN + pressure × (MAX_GREEN − MIN_GREEN) × NUM_LANES
-            green    = clamp(green, MIN_GREEN, MAX_GREEN)
-
-        Examples (4 lanes, range 15–60 s):
-          All balanced   [10, 10, 10, 10] → pressure=0.25 → green = 15+0.25×45×4 = 60 s
-              (each lane is equally busy; all lanes deserve max time)
-          Dominant lane  [30,  2,  2,  2] → pressure≈0.81 → green ≈ 60 s
-          Light lane     [ 2, 10, 10, 10] → pressure≈0.06 → green ≈ 26 s
-              (only 6% of traffic; gets a modest short green)
-          Empty lane     [ 0, 10, 10, 10] → pressure=0.0  → green = 15 s (floor)
-
-        This means green time is ALWAYS relative to the current session —
-        there are NO hardcoded thresholds like '0-5 = low'.
-        """
+    def relative_green_time(target_lane: int, all_w_counts: List[float], all_accidents: List[bool] = None, all_violations: List[bool] = None) -> int:
         if target_lane < 0 or target_lane >= len(all_w_counts):
             return NORMAL_MIN_GREEN
-
-        pressure = TrafficStateBuilder.relative_pressure(
-            all_w_counts[target_lane], all_w_counts
+        has_acc = all_accidents[target_lane] if all_accidents else False
+        has_vio = all_violations[target_lane] if all_violations else False
+        return TrafficStateBuilder.calculate_green_time(
+            all_w_counts[target_lane], 
+            has_acc, 
+            has_vio
         )
-        raw_time = NORMAL_MIN_GREEN + pressure * (MAX_GREEN_NORMAL - NORMAL_MIN_GREEN) * NUM_LANES
-        return int(np.clip(raw_time, NORMAL_MIN_GREEN, MAX_GREEN_NORMAL))
+
+    @staticmethod
+    def relative_pressure(lane_w: float, all_w: List[float]) -> float:
+        total = sum(all_w)
+        return float(lane_w / total) if total > 0 else 0.0
 
     @staticmethod
     def congestion_label(pressure: float) -> str:
-        """
-        Human-readable label based on RELATIVE pressure (not absolute count).
-
-        Thresholds are fraction-based:
-          low    : < 20 % share of total traffic
-          medium : 20 – 40 % share
-          high   : > 40 % share
-
-        For a 4-lane system equal share = 25 %, so:
-          Any lane clearly above its fair share     → high
-          Any lane around or slightly above         → medium
-          Any lane well below its fair share        → low
-        """
-        if pressure < 0.20:
+        if pressure < 0.25:
             return 'low'
-        elif pressure < 0.40:
+        elif pressure < 0.50:
             return 'medium'
         return 'high'
 
@@ -250,58 +209,24 @@ class TrafficStateBuilder:
               active_lane:     int,                 # currently green lane index
               elapsed_green:   float,               # seconds current green has been active
               buffer_locked:   bool) -> np.ndarray:
-        """
-        Build the 26-dim state vector.
+        """Build the 22-dim state vector."""
+        w_counts = []
+        em_flags = []
+        acc_flags = []
+        vio_flags = []
+        waits = []
 
-        Per-lane features now include RELATIVE pressure so the DQN directly
-        observes how much traffic each lane has compared to all others.
-
-        Returns:
-            numpy array, shape (26,), dtype float32
-        """
-        # First pass: compute weighted counts for all lanes (needed for relative features)
-        all_w_counts = []
         for lane_idx in range(NUM_LANES):
             dets = lane_detections[lane_idx] if lane_idx < len(lane_detections) else []
-            all_w_counts.append(cls.compute_weighted_count(dets))
+            w_counts.append(cls.compute_weighted_count(dets))
+            waits.append(float(wait_times[lane_idx]) if lane_idx < len(wait_times) else 0.0)
+            em_flags.append(1.0 if any(d.get('class_name') == 'emergency_vehicle' for d in dets) else 0.0)
+            acc_flags.append(1.0 if any(d.get('class_name') == 'accident' for d in dets) else 0.0)
+            vio_flags.append(1.0 if any(d.get('class_name') == 'pedestrian_violation' for d in dets) else 0.0)
 
-        features = []
-
-        for lane_idx in range(NUM_LANES):
-            dets          = lane_detections[lane_idx] if lane_idx < len(lane_detections) else []
-            w_count       = all_w_counts[lane_idx]
-            raw_count     = float(len([d for d in dets if d.get('class_name') != 'emergency_vehicle']))
-            wait          = float(wait_times[lane_idx]) if lane_idx < len(wait_times) else 0.0
-            has_emergency = 1.0 if any(d.get('class_name') == 'emergency_vehicle' for d in dets) else 0.0
-            is_starved    = 1.0 if (lane_idx != active_lane and wait >= STARVATION_THRESHOLD) else 0.0
-
-            # ── Relative pressure: this lane's share of total traffic ──────
-            # This is the critical feature that replaces fixed thresholds.
-            # The DQN sees a value close to 1/4 when all lanes are equal,
-            # close to 1.0 when this lane dominates, and 0.0 when it's empty.
-            pressure = cls.relative_pressure(w_count, all_w_counts)
-
-            features += [
-                pressure,                           # relative share of total traffic
-                min(raw_count / 50.0, 1.0),         # raw count (capped, still useful)
-                min(wait / 120.0, 1.0),             # wait time (normalised to 120 s)
-                has_emergency,
-                is_starved,
-            ]
-
-        # One-hot encode active green lane (4 dims)
-        one_hot = [0.0] * NUM_LANES
-        if 0 <= active_lane < NUM_LANES:
-            one_hot[active_lane] = 1.0
-        features += one_hot
-
-        # Elapsed green (normalised to MAX_GREEN_NORMAL)
-        features.append(min(elapsed_green / float(MAX_GREEN_NORMAL), 1.0))
-
-        # Buffer locked flag
-        features.append(1.0 if buffer_locked else 0.0)
-
-        return np.array(features, dtype=np.float32)  # shape: (26,)
+        # state = [lane_weighted_counts(4), wait_times(4), emergency(4), accident(4), violation(4), active_lane(1), elapsed_green(1)]
+        features = w_counts + waits + em_flags + acc_flags + vio_flags + [float(active_lane), float(elapsed_green)]
+        return np.array(features, dtype=np.float32)
 
 
 # ─────────────────────────────── DQN Agent ────────────────────────────────
@@ -446,26 +371,21 @@ class TrafficLightDQN:
                                  action:          int,
                                  current_lane:    int,
                                  lane_detections: List[List[Dict]]) -> Dict:
-        """Convert a raw action index into a full recommendation dict.
-
-        Action semantics:
-          0-3 → switch to lane N
-          4   → extend current green
-
-        Green time is computed RELATIVELY against all observed lanes.
-        """
         if action < NUM_LANES:
             target_lane = action
         else:
-            target_lane = current_lane   # extend = stay on current lane
+            target_lane = current_lane
 
-        # Build all-lane weighted counts for relative comparison
-        all_w = [TrafficStateBuilder.compute_weighted_count(
-                     lane_detections[i] if i < len(lane_detections) else [])
-                 for i in range(NUM_LANES)]
+        all_w = []
+        all_acc = []
+        all_vio = []
+        for i in range(NUM_LANES):
+            dets = lane_detections[i] if i < len(lane_detections) else []
+            all_w.append(TrafficStateBuilder.compute_weighted_count(dets))
+            all_acc.append(any(d.get('class_name') == 'accident' for d in dets))
+            all_vio.append(any(d.get('class_name') == 'pedestrian_violation' for d in dets))
 
-        green_time = TrafficStateBuilder.relative_green_time(target_lane, all_w)
-        pressure   = TrafficStateBuilder.relative_pressure(all_w[target_lane], all_w)
+        green_time = TrafficStateBuilder.relative_green_time(target_lane, all_w, all_acc, all_vio)
 
         return {
             'action':         action,
@@ -473,12 +393,10 @@ class TrafficLightDQN:
             'is_switch':      (action < NUM_LANES and action != current_lane),
             'is_extend':      (action == 4 or action == current_lane),
             'green_time':     green_time,
-            'congestion':     TrafficStateBuilder.congestion_label(pressure),
-            'relative_pressure': pressure,
+            'congestion':     TrafficStateBuilder.congestion_label(all_w[target_lane]),
             'weighted_count': all_w[target_lane],
         }
 
-    # ── Reward function ───────────────────────────────────────────────────
     @staticmethod
     def calculate_reward(prev_wait_times:     List[float],
                          next_wait_times:     List[float],
@@ -489,66 +407,66 @@ class TrafficLightDQN:
                          emergency_flags:     List[bool],
                          buffer_violated:     bool,
                          action:              int,
-                         emergency_cleared:   bool = False) -> float:
-        """
-        Multi-component reward signal.
+                         emergency_cleared:   bool = False,
+                         accident_flags:      List[bool] = None,
+                         violation_flags:     List[bool] = None) -> float:
+        if accident_flags is None:
+            accident_flags = [False] * NUM_LANES
+        if violation_flags is None:
+            violation_flags = [False] * NUM_LANES
 
-        TOTAL REWARD = Σ components (clipped to [-500, +500])
+        # Wait time reduction
+        delta_wait = sum(prev_wait_times) - sum(next_wait_times)
+        R_wait = delta_wait * 0.3
 
-        Components
-        ──────────
-        R_wait    : δ(total waiting time)   — negative values are bad
-        R_queue   : δ(total queue length)   — negative values are bad
-        R_emergency_green  : bonus if emergency lane is GREEN
-        R_emergency_ignore : penalty if emergency lane is RED and DQN ignored it
-        R_emergency_clear  : big bonus for clearing an emergency vehicle
-        R_buffer_violation : penalty for trying to switch within 10-sec buffer
-        R_starvation       : penalty per lane that has exceeded starvation threshold
-        R_fairness         : smoothing reward — penalise if only 1 lane gets green
-        """
-        # 1. Waiting time reduction (higher reduction → bigger reward)
-        prev_total_wait = sum(prev_wait_times)
-        next_total_wait = sum(next_wait_times)
-        delta_wait      = prev_total_wait - next_total_wait
-        R_wait          = delta_wait * 0.3   # scale
+        # Queue length reduction
+        delta_queue = sum(prev_queue_lengths) - sum(next_queue_lengths)
+        R_queue = delta_queue * 1.0
 
-        # 2. Queue length reduction
-        prev_total_q = sum(prev_queue_lengths)
-        next_total_q = sum(next_queue_lengths)
-        delta_queue  = prev_total_q - next_total_q
-        R_queue      = delta_queue * 1.0   # scale
-
-        # 3. Emergency vehicle handling
-        R_emergency_green  = 0.0
+        R_emergency_green = 0.0
         R_emergency_ignore = 0.0
         for lane_idx, em in enumerate(emergency_flags):
             if em:
                 if lane_idx == active_lane:
-                    # Good — we are serving the emergency lane
                     R_emergency_green += 150.0
                 else:
-                    # Bad — emergency vehicle is waiting on red
                     R_emergency_ignore -= 200.0
 
-        # 4. Emergency cleared bonus
         R_emergency_clear = 300.0 if emergency_cleared else 0.0
-
-        # 5. Buffer-violation penalty
         R_buffer_violation = -80.0 if buffer_violated else 0.0
 
-        # 6. Starvation penalty
         R_starvation = 0.0
         for lane_idx, wait in enumerate(next_wait_times):
             if lane_idx != active_lane and wait >= STARVATION_THRESHOLD:
                 R_starvation -= 50.0 * (wait / STARVATION_THRESHOLD)
 
-        # 7. Congestion accumulation penalty
         R_congestion = -0.5 * sum(next_queue_lengths)
 
-        total = (R_wait + R_queue + R_emergency_green + R_emergency_ignore
-                 + R_emergency_clear + R_buffer_violation + R_starvation + R_congestion)
+        # Accident-aware reward shaping
+        R_accident = 0.0
+        for lane_idx, is_acc in enumerate(accident_flags):
+            if is_acc:
+                # Penalize increasing queue toward accident lane
+                if next_queue_lengths[lane_idx] > prev_queue_lengths[lane_idx]:
+                    R_accident -= 30.0
+                # Reward clearing vehicles before accident area (active green reduces queue)
+                if lane_idx == active_lane and (prev_queue_lengths[lane_idx] - next_queue_lengths[lane_idx] > 0):
+                    R_accident += 20.0
 
-        # Clip to prevent reward explosion
+        # Pedestrian violation reward shaping
+        R_violation = 0.0
+        for lane_idx, is_vio in enumerate(violation_flags):
+            if is_vio:
+                R_violation -= 20.0  # Penalize violation occurrences
+
+        # Reward balanced redistribution
+        q_std = np.std(next_queue_lengths)
+        R_balance = -2.0 * q_std
+
+        total = (R_wait + R_queue + R_emergency_green + R_emergency_ignore
+                 + R_emergency_clear + R_buffer_violation + R_starvation 
+                 + R_congestion + R_accident + R_violation + R_balance)
+
         return float(np.clip(total, -500.0, 500.0))
 
     # ── Memory & training ─────────────────────────────────────────────────
@@ -611,26 +529,22 @@ class TrafficLightDQN:
                               emergency_flag: bool,
                               accident_flag:  bool,
                               lane_id:        int = 0) -> Dict:
-        """
-        Backward-compatible prediction interface used by the controller.
-
-        Green time is now computed RELATIVELY — lane_id's count is compared
-        against all other lanes so the same absolute count gets different
-        durations depending on the current traffic distribution.
-        """
         state  = self.preprocess_system_state(lane_counts, emergency_flag, accident_flag)
         action = self.get_action(state, training=False)
 
-        # Build weighted counts for all lanes (treating each count as cars)
-        all_w = [float(c) * VEHICLE_WEIGHTS.get('car', 1.0)
-                 for c in (lane_counts[:NUM_LANES] + [0] * NUM_LANES)[:NUM_LANES]]
+        all_w = []
+        all_acc = []
+        all_vio = []
+        for i in range(NUM_LANES):
+            count = lane_counts[i] if i < len(lane_counts) else 0
+            # Rough estimation for inference when only counts are available
+            all_w.append(float(count) * VEHICLE_WEIGHTS.get('car', 2.0))
+            all_acc.append(accident_flag if i == lane_id else False)
+            all_vio.append(False)
 
-        # Relative green time: compares lane_id against the whole distribution
-        green_time = TrafficStateBuilder.relative_green_time(lane_id, all_w)
-        pressure   = TrafficStateBuilder.relative_pressure(all_w[lane_id], all_w)
-        congestion = TrafficStateBuilder.congestion_label(pressure)
+        green_time = TrafficStateBuilder.relative_green_time(lane_id, all_w, all_acc, all_vio)
+        congestion = TrafficStateBuilder.congestion_label(all_w[lane_id])
 
-        # Confidence from Q-value magnitude
         with torch.no_grad():
             state_t    = torch.FloatTensor(state).unsqueeze(0).to(self.device)
             q_vals     = self.policy_net(state_t)
@@ -646,7 +560,6 @@ class TrafficLightDQN:
             'all_red_time':      self.all_red_time,
             'total_cycle_time':  green_time + self.yellow_time + self.all_red_time,
             'vehicle_count':     count,
-            'relative_pressure': pressure,
             'congestion':        congestion,
             'confidence':        confidence,
             'epsilon':           self.epsilon,

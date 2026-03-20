@@ -122,7 +122,7 @@ class Sidebar:
         self._nav_section_lbl.pack(fill=tk.X, padx=16, pady=(10, 4))
 
         nav_items = [
-            ('📊', 'Dashboard',        'dashboard'),
+            ('📊', 'Traffic Live Camera', 'dashboard'),
             ('⚠️', 'Issue Reports',    'issue_reports'),
             ('🚦', 'Traffic Reports',  'traffic_reports'),
             ('📜', 'Incident History', 'incident_history'),
@@ -160,11 +160,18 @@ class Sidebar:
                             bg=_SIDEBAR_BG, fg=_MUTED,
                             anchor='w')
         text_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 10))
+        
+        # Badge canvas (Real Red Dot Notification)
+        badge_canvas = tk.Canvas(row, width=20, height=20, bg=_SIDEBAR_BG, highlightthickness=0)
+        circle_id = badge_canvas.create_oval(1, 1, 19, 19, fill=Colors.DANGER, outline='')
+        text_id = badge_canvas.create_text(10, 10, text="", fill="white", font=('Segoe UI', 8, 'bold'))
 
         # Store references
         self.nav_buttons[page_name] = {
             'row': row, 'accent': accent,
-            'icon': icon_lbl, 'text': text_lbl
+            'icon': icon_lbl, 'text': text_lbl,
+            'badge_canvas': badge_canvas,
+            'badge_text_id': text_id
         }
 
         # Events helper
@@ -180,6 +187,7 @@ class Sidebar:
                 row.config(bg=_HOVER_BG)
                 icon_lbl.config(bg=_HOVER_BG)
                 text_lbl.config(bg=_HOVER_BG, fg=_TEXT)
+                badge_canvas.config(bg=_HOVER_BG)
             # Show tooltip when collapsed
             if not self._expanded:
                 self._show_tooltip(row, label)
@@ -189,6 +197,7 @@ class Sidebar:
                 row.config(bg=_SIDEBAR_BG)
                 icon_lbl.config(bg=_SIDEBAR_BG)
                 text_lbl.config(bg=_SIDEBAR_BG, fg=_MUTED)
+                badge_canvas.config(bg=_SIDEBAR_BG)
             self._hide_tooltips()
 
         for w in widgets:
@@ -207,11 +216,13 @@ class Sidebar:
                 refs['icon'].config(bg=_ACTIVE_BG, fg=_ACCENT)
                 refs['text'].config(bg=_ACTIVE_BG, fg=_TEXT)
                 refs['accent'].config(bg=_ACCENT)
+                refs['badge_canvas'].config(bg=_ACTIVE_BG)
             else:
                 refs['row'].config(bg=_SIDEBAR_BG)
                 refs['icon'].config(bg=_SIDEBAR_BG, fg=_MUTED)
                 refs['text'].config(bg=_SIDEBAR_BG, fg=_MUTED)
                 refs['accent'].config(bg=_SIDEBAR_BG)
+                refs['badge_canvas'].config(bg=_SIDEBAR_BG)
         self.active_page = page_name
 
     # ── Cameras section ──────────────────────────────────────────────────
@@ -269,37 +280,18 @@ class Sidebar:
     # Toggle / animation
     # ═══════════════════════════════════════════════════════════════════════
     def _toggle(self):
-        if self._animating:
-            return
-        self._animating = True
         self._expanded  = not self._expanded
 
         target_w  = _EXPANDED_W if self._expanded else _COLLAPSED_W
-        current_w = self.frame.winfo_width()
-        step      = (target_w - current_w) / _ANIM_STEPS
 
         self._toggle_btn.config(text='\u2039' if self._expanded else '\u203a')
 
         if not self._expanded:
-            # ── COLLAPSING: hide text NOW (before animation) ──────────────
-            # This prevents Tkinter from re-wrapping text on every width step.
             self._set_text_visible(False)
-
-        self._animate_slide(current_w, target_w, step, _ANIM_STEPS)
-
-    def _animate_slide(self, current: float, target: int,
-                       step: float, remaining: int):
-        if remaining <= 0:
-            self.frame.config(width=target)
-            self._animating = False
-            if self._expanded:
-                # ── EXPANDING: reveal text AFTER width is final ───────────
-                self._set_text_visible(True)
-            return
-        new_w = int(current + step)
-        self.frame.config(width=new_w)
-        self.frame.after(_ANIM_MS,
-                         lambda: self._animate_slide(new_w, target, step, remaining - 1))
+            self.frame.config(width=target_w)
+        else:
+            self.frame.config(width=target_w)
+            self._set_text_visible(True)
 
     def _set_text_visible(self, visible: bool):
         """Show or hide all text-heavy elements instantly (no intermediate layout)."""
@@ -311,6 +303,9 @@ class Sidebar:
             for refs in self.nav_buttons.values():
                 refs['text'].pack(side=tk.LEFT, fill=tk.X,
                                   expand=True, padx=(6, 10))
+                # Check if badge has a count to show
+                if refs['badge_canvas'].itemcget(refs['badge_text_id'], 'text') not in ('', '0'):
+                    refs['badge_canvas'].pack(side=tk.RIGHT, padx=(0, 15))
             self._cam_container.pack(fill=tk.X)
         else:
             self._brand_text.place_forget()
@@ -319,6 +314,7 @@ class Sidebar:
             self._cam_section_lbl.pack_forget()
             for refs in self.nav_buttons.values():
                 refs['text'].pack_forget()
+                refs['badge_canvas'].pack_forget()
             self._cam_container.pack_forget()
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -357,10 +353,19 @@ class Sidebar:
         self.cameras_data = new_data
         self.render_cameras()
 
-    def update_nav_item(self, page_name: str, new_text: str):
-        """Update nav button text (e.g., for notification badges)."""
+    def update_nav_badge(self, page_name: str, count: int):
+        """Update notification badge circle with count"""
         if page_name in self.nav_buttons:
-            self.nav_buttons[page_name]['text'].config(text=new_text)
+            refs = self.nav_buttons[page_name]
+            canvas = refs['badge_canvas']
+            text_id = refs['badge_text_id']
+            if count > 0:
+                canvas.itemconfig(text_id, text=str(count))
+                if self._expanded:
+                    canvas.pack(side=tk.RIGHT, padx=(0, 15))
+            else:
+                canvas.itemconfig(text_id, text="0")
+                canvas.pack_forget()
 
     def get_widget(self) -> tk.Frame:
         return self.frame

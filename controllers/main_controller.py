@@ -180,7 +180,7 @@ class MainController:
                         reports = self.db.get_all_reports() or []
                         self.last_viewed_report_count = len(reports)
                     if self.view and hasattr(self.view, 'sidebar'):
-                        self.view.sidebar.update_nav_item('issue_reports', "⚠️ Issue Reports")
+                        self.view.sidebar.update_nav_badge('issue_reports', 0)
                 except Exception as ex:
                     self.logger.error(f"Error resetting report notification: {ex}")
 
@@ -265,11 +265,7 @@ class MainController:
                     try:
                         reports = self.db.get_all_reports() or []
                         unread = len(reports) - getattr(self, 'last_viewed_report_count', 0)
-                        if unread > 0:
-                            new_text = f"⚠️ Issue Reports 🔴 {unread}"
-                        else:
-                            new_text = "⚠️ Issue Reports"
-                        self.root.after(0, lambda t=new_text: self.view.sidebar.update_nav_item('issue_reports', t))
+                        self.root.after(0, lambda c=unread: self.view.sidebar.update_nav_badge('issue_reports', c))
                     except Exception as e:
                         pass # Silently handle if database fails or widgets no longer exist
 

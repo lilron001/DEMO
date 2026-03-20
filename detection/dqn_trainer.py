@@ -73,9 +73,17 @@ class TrafficSimulator:
 
         # Emergency vehicles — may be present at start in ≤1 lane
         self.emergency = [False] * self.num_lanes
+        self.accident = [False] * self.num_lanes
+        self.violation = [False] * self.num_lanes
         if random.random() < 0.15:
             lane = random.randrange(self.num_lanes)
             self.emergency[lane] = True
+        if random.random() < 0.05:
+            lane = random.randrange(self.num_lanes)
+            self.accident[lane] = True
+        if random.random() < 0.10:
+            lane = random.randrange(self.num_lanes)
+            self.violation[lane] = True
 
         # Current green state
         self.active_lane      = random.randrange(self.num_lanes)
@@ -132,9 +140,9 @@ class TrafficSimulator:
             self.active_lane              = effective_action
             self.elapsed_green            = 0.0
             self.buffer_locked            = True
-            # Assign green duration based on RELATIVE congestion across all lanes
+            # Assign green duration based on weighted congestion across all lanes
             self.current_green_duration   = float(
-                TrafficStateBuilder.relative_green_time(self.active_lane, self.queues)
+                TrafficStateBuilder.relative_green_time(self.active_lane, self.queues, self.accident, self.violation)
             )
             switched = True
 
@@ -161,9 +169,19 @@ class TrafficSimulator:
                 self.raw_queues[lane_idx] = min(100, self.raw_queues[lane_idx] + arrivals)
                 self.wait_times[lane_idx] += 1.0
 
-                # Spontaneous emergency vehicle appearance (low prob)
+                # Spontaneous appearance of special conditions (low prob)
                 if not self.emergency[lane_idx] and random.random() < 0.002:
                     self.emergency[lane_idx] = True
+                if not self.accident[lane_idx] and random.random() < 0.001:
+                    self.accident[lane_idx] = True
+                if not self.violation[lane_idx] and random.random() < 0.003:
+                    self.violation[lane_idx] = True
+                # Clear random violations periodically
+                if self.violation[lane_idx] and random.random() < 0.1:
+                    self.violation[lane_idx] = False
+                # Clear random accidents gradually
+                if self.accident[lane_idx] and random.random() < 0.02:
+                    self.accident[lane_idx] = False
 
         # ─── Starvation check: force minimum green if starved ───────────
         for lane_idx in range(self.num_lanes):
@@ -192,6 +210,8 @@ class TrafficSimulator:
             buffer_violated    = buffer_violated,
             action             = effective_action,
             emergency_cleared  = emergency_cleared,
+            accident_flags     = self.accident[:],
+            violation_flags    = self.violation[:]
         )
 
         # ─── Build next state ────────────────────────────────────────────
@@ -262,6 +282,22 @@ class TrafficSimulator:
                     'confidence': 0.99,
                     'bbox':       [100, 100, 160, 140],
                     'center':     (130, 120),
+                })
+            # Inject accident if flagged
+            if self.accident[lane_idx]:
+                lane_dets.append({
+                    'class_name': 'accident',
+                    'confidence': 0.95,
+                    'bbox':       [50, 50, 100, 80],
+                    'center':     (75, 65),
+                })
+            # Inject violation if flagged
+            if self.violation[lane_idx]:
+                lane_dets.append({
+                    'class_name': 'pedestrian_violation',
+                    'confidence': 0.90,
+                    'bbox':       [10, 100, 30, 150],
+                    'center':     (20, 125),
                 })
             dets.append(lane_dets)
         return dets
@@ -465,7 +501,7 @@ def train_dqn_model(num_episodes: int = 3000,
                     save_dir:     str  = "models/dqn") -> Tuple:
     """Convenience function: instantiate, train, evaluate, return results."""
     model = TrafficLightDQN(
-        state_size      = 26,
+        state_size      = 22,
         action_size     = 5,
         hidden_size     = 256,
         learning_rate   = 5e-4,

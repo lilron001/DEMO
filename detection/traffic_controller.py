@@ -82,7 +82,7 @@ class TrafficLightController:
         self.yolo = YOLODetector()
 
         # DQN agent
-        self.dqn = TrafficLightDQN(state_size=26, action_size=5, hidden_size=256)
+        self.dqn = TrafficLightDQN(state_size=22, action_size=5, hidden_size=256)
         if use_pretrained and model_path:
             try:
                 self.dqn.load_model(model_path)
