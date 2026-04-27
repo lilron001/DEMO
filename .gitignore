@@ -26,7 +26,31 @@ MANIFEST
 venv/
 ENV/
 env/
+
+# Environment variables
 .env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+error_log.txt
+exe_log.txt
+
+# Temporary files
+*.tmp
+*.temp
 
 # Environment Variables (CRITICAL: Do not remove this)
 .env
